@@ -1,0 +1,148 @@
+#!/bin/sh
+#$ -V
+#$ -cwd
+#$ -q parallel.q
+##$ -q test.q
+#$ -pe openmpi_16 32
+#$ -l exclusive_job=1
+#$ -m abe
+#$ -M akilbapu@sbcglobal.net
+##$ -l mem_free=32G
+
+####################################################
+### (1) ANNEAL SYSTEM AT 500K and then 10K for a   #
+###     total of 750,000 steps                     #
+### (2) Loop over 50 times, and for each iteration # 
+##      increase Z dimension by +0.1%; Run NPT MD  #
+##      for 500000 steps at 10K                    #            
+####################################################
+
+##################################################
+## qsub COMMANDS
+##################################################
+## qsub < job_script    ## Submit the batch job
+## qjobs -a             ## Show All Jobs 
+## qstat
+## qdel ID              ## Kill running/pending job
+###################################################
+set echo                   # Echo all commands
+
+## Change to submission directory
+cd $SGE_CWD_PATH
+
+JobDir=`pwd`
+
+## Print working directory and processors
+echo "working directory is " $LS_SUBCWD
+echo -n "Executed on " $LSB_HOSTS 
+
+# No core dumps
+ulimit -c 0
+
+# Set Process ID
+PbsId=$$
+
+# What kind of system are we on?
+OS=`uname`
+
+## Element
+outFilNm=“Nanopore”
+
+## LAMMPS Executable
+exc="/home/ab0622/bin/lmp_talon2*"
+
+## Check if the executable exists
+if [ ! -f $exc ];  then
+ echo "Executable $exc does NOT exist. Quitting early"; exit 1
+## Close if
+fi
+
+## Cu Potential File: Check if it exists
+potFil="../CuAg.eam.alloy.fcn"
+if [ ! -f $potFil ];  then
+ echo "Potential file $potFil does NOT exist. Quitting early"; exit 2
+## Close if
+fi
+
+echo ""
+echo "*****************************************"
+echo "  STARTED PROGRAM $exc  at `date` "
+echo "*****************************************"
+echo ""
+
+#####################################
+## (1) RELAX SAMPLE AT ZERO STRAIN ##
+#####################################
+## INPUT LAMMPS DATA or RESTART File
+inpDataFil="../PoreData1seq"
+
+if [ ! -f $inpDataFil ];  then
+ echo "Input atom file $inpDataFil does NOT exist. Quitting early"; exit 3
+## Close if
+fi
+
+## Annealing 
+Temperature01=“300.0” 
+Temperature02="10.0" 
+Tdampp=“300.0”
+
+cat > Anneal00${PbsId}.i <<!
+# ------------------------ INITIALIZATION ----------------------------
+units                   metal
+atom_style              atomic
+boundary                p p p
+newton                  on
+#atom_modify    on
+
+# ----------------------- ATOM DEFINITION ----------------------------
+read_data               ${inpDataFil}
+
+# ------------------------- FORCE FIELDS -----------------------------
+pair_style              eam/alloy
+pair_coeff              * * $potFil Cu
+
+# ------------------------- SETTINGS ---------------------------------
+compute csym all centro/atom fcc
+compute peratom all pe/atom 
+
+# ---------------------- LOG File: Unique ----------------------------
+log  Anneal${outFilNm}.log
+
+######################################
+# EQUILIBRATION/Anneal
+reset_timestep  0
+timestep        0.001
+velocity all create ${Temperature01} 12345 mom yes rot no
+
+## ORIGINAL: drag 1
+fix 1 all npt temp ${Temperature01} ${Temperature01} ${Tdampp} iso 0 0 1 drag 0.5 
+
+# Set thermo output
+thermo 300
+thermo_style custom step temp pe lx ly lz pxx pyy pzz press 
+
+#######
+# for units metal, pressure is in [bars] = 100 [kPa] = 1/10000 [GPa]
+#######
+
+# Use custom dump for OVITO
+dump        1 all custom 100000 Anneal${outFilNm}.dump.* id type x y z c_csym c_peratom
+restart     50000 Anneal${outFilNm}.rst.*
+
+# Anneal at High Temperature (500K??) for at least 500 picosecond (assuming 1 fs timestep)
+run 500000
+unfix 1
+
+######################################
+# SIMULATION DONE
+print "All done"
+!
+
+# Run LAMMPS and ANNEAL the System
+time mpirun $exc < Anneal00${PbsId}.i
+
+echo ""
+echo "*****************************************"
+echo "  FINISHED PROGRAM $exc  at `date` "
+echo "*****************************************"
+echo ""
